@@ -1,87 +1,7 @@
 <html>
 <head>
-
-<script type="application/javascript" id="compiler">
-function TOKEN_EOF(){}
-
-function scan(code){
-    let tokens = [];
-    let ranges = [];
-    let current_position = 0;
-    let patterns = [
-        {
-            name: 'space',
-            regex: /^\s+/,
-            push: false
-        },
-        {
-            name: 'comment',
-            regex: /^\/\/[^\n]*/,
-            push: false
-        },
-        {
-            name: 'comment',
-            regex: /^\/\*(?:[^\*]|\*(?!\/))*\*[\/]/,
-            push: false
-        },
-        {
-            name: 'identifier',
-            regex: /^[a-zA-Z_][a-zA-Z0-9_]*/,
-            push: true
-        },
-        {
-            name: 'number',
-            regex: /^[0-9]+/,
-            push: true
-        },
-        {
-            name: 'string literal',
-            regex: /^"(?:[^"\\]|\\.)*"/,
-            push: true
-        },
-        {
-            name: 'annotation',
-            regex: /^\[\[[^\[\]]*\]\]/,
-            push: true
-        },
-        {
-            name: 'symbol',
-            exact: ["[", "]", "(", ")", "{", "}", "->", ",", "=", ";", "...", "+", "-", "*", "/", "!", "%", "^", "&", "~", "?", ":", "|", "||", "&&", "+=", "-=", "*=", "/=", "%=", "^=", "&=", "~=", "|=", "++", "--", "==", "!=", ">=", "<=", ">", "<", ">>", "<<", ">>=", "<<="].sort((a, b) => b.length - a.length),
-            push: true
-        }
-    ];
     
-    while (code != ""){
-        let match = null;
-        // console.log(code);
-        for (let pattern of patterns){
-            if (pattern.regex != null && pattern.regex != undefined && (match = code.match(pattern.regex)) != null){
-                if (pattern.push){
-                    tokens.push(match[0]);
-                    ranges.push([current_position, match[0].length]);
-                }
-                code = code.substring(match[0].length);
-                current_position += match[0].length;
-                break;
-            }else if (pattern.exact != null && pattern.exact != undefined && (match = pattern.exact.filter(e => code.substring(0, e.length) == e)[0]) != undefined){
-                if (pattern.push){
-                    tokens.push(match);
-                    ranges.push([current_position, match.length]);
-                }
-                code = code.substring(match.length);
-                current_position += match.length;
-                break;
-            }else{
-                match = null;
-            }
-        }
-        if (match == null) return null;
-    }
-    tokens.push(TOKEN_EOF);
-    ranges.push([code.length, 0]);
-    return [tokens, ranges];
-}
-
+<script>
 function left_associate(kind){
     return function(args){
         if (args.right.kind != kind){
@@ -125,6 +45,279 @@ function left_associate(kind){
     }
 }
 
+let shibata = {
+    patterns: [
+        {
+            name: 'space',
+            regex: /^\s+/,
+            push: false
+        },
+        {
+            name: 'comment',
+            regex: /^\/\/[^\n]*/,
+            push: false
+        },
+        {
+            name: 'comment',
+            regex: /^\/\*(?:[^\*]|\*(?!\/))*\*[\/]/,
+            push: false
+        },
+        {
+            name: 'identifier',
+            regex: /^[a-zA-Z_][a-zA-Z0-9_]*/,
+            push: true
+        },
+        {
+            name: 'number',
+            regex: /^[0-9]+/,
+            push: true
+        },
+        {
+            name: 'string literal',
+            regex: /^"(?:[^"\\]|\\.)*"/,
+            push: true
+        },
+        {
+            name: 'annotation',
+            regex: /^\[\[[^\[\]]*\]\]/,
+            push: true
+        },
+        {
+            name: 'symbol',
+            exact: ["[", "]", "(", ")", "{", "}", "->", ",", "=", ";", "...", "+", "-", "*", "/", "!", "%", "^", "&", "~", "?", ":", "|", "||", "&&", "+=", "-=", "*=", "/=", "%=", "^=", "&=", "~=", "|=", "++", "--", "==", "!=", ">=", "<=", ">", "<", ">>", "<<", ">>=", "<<="].sort((a, b) => b.length - a.length),
+            push: true
+        }
+    ],
+    rules = {
+        'parameter_list/tail': {
+            expression: ['param:identifier'],
+            yield: (args => ({
+                kind: 'parameter_list',
+                cases: {
+                    params: [args['param']]
+                }
+            }))
+        },
+        'parameter_list/nontail': {
+            expression: ['param:identifier', ':raw(,)', 'pl:parse(parameter_list)'],
+            yield: function(args){
+                args['pl'].begin = args['pl'].length = null;
+                args['pl'].cases.params.splice(0, 0, args['param']);
+                return args['pl'];
+            }
+        },
+        'statement/function/p': {
+            expression: [':raw(function)', 'name:identifier', ':raw(()', 'params:parse(parameter_list)', ':raw())', ':raw({)', 'statements:parse(statements)', ':raw(})'],
+            yield: (args => ({
+                kind: 'function',
+                cases: args
+            }))
+        },
+        'statement/function/no_p': {
+            expression: [':raw(function)', 'name:identifier', ':raw(()', ':raw())', ':raw({)', 'statements:parse(statements)', ':raw(})'],
+            yield: (args => ({
+                kind: 'function',
+                cases: args
+            }))
+        },
+
+        'expression/p0': {
+            expression: ['left:parse(expression/p_inf/variable)', 'mid:parse(symbol/p0)', 'right:parse(expression/p0|expression/p1|expression/p2|expression/p3|expression/p_inf)'],
+            yield: (args => ({
+                kind: 'expression_p0',
+                cases: args
+            }))
+        },
+        'symbol/p0/assign': {
+            expression: [':raw(=)'],
+            yield: (args => ({
+                kind: 'symbol'
+            }))
+        },
+
+        'expression/p1': {
+            expression: ['left:parse(expression/p2|expression/p3|expression/p_inf)', 'mid:parse(symbol/p1)', 'right:parse(expression/p1|expression/p2|expression/p3|expression/p_inf)'],
+            yield: left_associate('expression_p1')
+        },
+        'symbol/p1/plus': {
+            expression: [':raw(+)'],
+            yield: (args => ({
+                kind: 'symbol'
+            }))
+        },
+        'symbol/p1/minus': {
+            expression: [':raw(-)'],
+            yield: (args => ({
+                kind: 'symbol'
+            }))
+        },
+
+        'expression/p2': {
+            expression: ['left:parse(expression/p3|expression/p_inf)', 'mid:parse(symbol/p2)', 'right:parse(expression/p2|expression/p3|expression/p_inf)'],
+            yield: left_associate('expression_p2')
+        },
+        'symbol/p2/multiply': {
+            expression: [':raw(*)'],
+            yield: (args => ({
+                kind: 'symbol'
+            }))
+        },
+        'symbol/p2/divide': {
+            expression: [':raw(/)'],
+            yield: (args => ({
+                kind: 'symbol'
+            }))
+        },
+        'symbol/p2/mod': {
+            expression: [':raw(%)'],
+            yield: (args => ({
+                kind: 'symbol'
+            }))
+        },
+
+        'expression/p3/a': {
+            expression: ['callee:identifier', ':raw(()', 'args:parse(argument_list)', ':raw())'],
+            yield: (args => ({
+                kind: 'expression_p3',
+                cases: args
+            }))
+        },
+        'expression/p3/na': {
+            expression: ['callee:identifier', ':raw(()', ':raw())'],
+            yield: (args => ({
+                kind: 'expression_p3',
+                cases: args
+            }))
+        },
+        'argument_list/tail': {
+            expression: ['arg:parse(expression)'],
+            yield: (args => ({
+                kind: 'argument_list',
+                cases: {
+                    args: [args['arg']]
+                }
+            }))
+        },
+        'argument_list/nontail': {
+            expression: ['arg:parse(expression)', ':raw(,)', 'al:parse(argument_list)'],
+            yield: function(args){
+                args['al'].begin = args['al'].length = null;
+                args['al'].cases.args.splice(0, 0, args['arg']);
+                return args['al'];
+            }
+        },
+
+        'expression/p_inf/variable': {
+            expression: ['value:identifier'],
+            yield: (args => ({
+                kind: 'value',
+                cases: args
+            }))
+        },
+        'expression/p_inf/number': {
+            expression: ['value:number'],
+            yield: (args => ({
+                kind: 'value',
+                cases: args
+            }))
+        },
+        'expression/p_inf/bracket': {
+            expression: [':raw(()', 'exp:parse(expression)', ':raw())'],
+            yield: (args => ({
+                kind: 'bracket',
+                cases: args
+            }))
+        },
+
+        'statement/expression': {
+            expression: ['exp:parse(expression)', ':raw(;)'],
+            yield: (args => ({
+                kind: 'statement_exp',
+                cases: args
+            }))
+        },
+
+        'statement/if': {
+            expression: [':raw(if)', ':raw(()', 'condition:parse(expression)', ':raw())', ':raw({)', 'statements:parse(statements)', ':raw(})'],
+            yield: (args => ({
+                kind: 'if',
+                cases: args
+            }))
+        },
+
+        'statement/while': {
+            expression: [':raw(while)', ':raw(()', 'condition:parse(expression)', ':raw())', ':raw({)', 'statements:parse(statements)', ':raw(})'],
+            yield: (args => ({
+                kind: 'while',
+                cases: args
+            }))
+        },
+
+        'statements/single': {
+            expression: ['s:parse(statement)'],
+            yield: (args => ({
+                kind: 'statements',
+                cases:{
+                    statements: [args['s']]
+                }
+            }))
+        },
+        'statements/multiple': {
+            expression: ['s:parse(statement)', 'ss:parse(statements)'],
+            yield(args){
+                args['ss'].begin = args['ss'].length = null;
+                args['ss'].cases.statements.splice(0, 0, args['s']);
+                return args['ss'];
+            }
+        },
+        'program': {
+            expression: ['s:parse(statements)', ':eof'],
+            yield: (args => args['s'])
+        },
+    }
+};
+</script>
+
+<script type="application/javascript" id="compiler">
+function TOKEN_EOF(){}
+
+function scan(code){
+    let tokens = [];
+    let ranges = [];
+    let current_position = 0;
+    let patterns = shibata.patterns;
+    
+    while (code != ""){
+        let match = null;
+        // console.log(code);
+        for (let pattern of patterns){
+            if (pattern.regex != null && pattern.regex != undefined && (match = code.match(pattern.regex)) != null){
+                if (pattern.push){
+                    tokens.push(match[0]);
+                    ranges.push([current_position, match[0].length]);
+                }
+                code = code.substring(match[0].length);
+                current_position += match[0].length;
+                break;
+            }else if (pattern.exact != null && pattern.exact != undefined && (match = pattern.exact.filter(e => code.substring(0, e.length) == e)[0]) != undefined){
+                if (pattern.push){
+                    tokens.push(match);
+                    ranges.push([current_position, match.length]);
+                }
+                code = code.substring(match.length);
+                current_position += match.length;
+                break;
+            }else{
+                match = null;
+            }
+        }
+        if (match == null) return null;
+    }
+    tokens.push(TOKEN_EOF);
+    ranges.push([code.length, 0]);
+    return [tokens, ranges];
+}
+
 class Parser{
     constructor(tokens){
         this.possibilities = {};
@@ -139,200 +332,7 @@ class Parser{
             expression is an array of grammatical cases. It will be processed into a linklist. Therefore rule should never be modified/cloned.
             yield is a function that generate possibilities.
         */
-        this.rules = {
-            'parameter_list/tail': {
-                expression: ['param:identifier'],
-                yield: (args => ({
-                    kind: 'parameter_list',
-                    cases: {
-                        params: [args['param']]
-                    }
-                }))
-            },
-            'parameter_list/nontail': {
-                expression: ['param:identifier', ':raw(,)', 'pl:parse(parameter_list)'],
-                yield: function(args){
-                    args['pl'].begin = args['pl'].length = null;
-                    args['pl'].cases.params.splice(0, 0, args['param']);
-                    return args['pl'];
-                }
-            },
-            'statement/function/p': {
-                expression: [':raw(function)', 'name:identifier', ':raw(()', 'params:parse(parameter_list)', ':raw())', ':raw({)', 'statements:parse(statements)', ':raw(})'],
-                yield: (args => ({
-                    kind: 'function',
-                    cases: args
-                }))
-            },
-            'statement/function/no_p': {
-                expression: [':raw(function)', 'name:identifier', ':raw(()', ':raw())', ':raw({)', 'statements:parse(statements)', ':raw(})'],
-                yield: (args => ({
-                    kind: 'function',
-                    cases: args
-                }))
-            },
-            
-            'expression/p0': {
-                // expression: ['left:parse(expression/p1|expression/p2|expression/p3|expression/p_inf)', 'mid:parse(symbol/p0)', 'right:parse(expression/p0|expression/p1|expression/p2|expression/p3|expression/p_inf)'],
-                expression: ['left:parse(expression/p_inf/variable)', 'mid:parse(symbol/p0)', 'right:parse(expression/p0|expression/p1|expression/p2|expression/p3|expression/p_inf)'],
-                yield: (args => ({
-                    kind: 'expression_p0',
-                    cases: args
-                }))
-            },
-            'symbol/p0/assign': {
-                expression: [':raw(=)'],
-                yield: (args => ({
-                    kind: 'symbol'
-                }))
-            },
-
-            'expression/p1': {
-                expression: ['left:parse(expression/p2|expression/p3|expression/p_inf)', 'mid:parse(symbol/p1)', 'right:parse(expression/p1|expression/p2|expression/p3|expression/p_inf)'],
-                yield: left_associate('expression_p1')
-            },
-            'symbol/p1/plus': {
-                expression: [':raw(+)'],
-                yield: (args => ({
-                    kind: 'symbol'
-                }))
-            },
-            'symbol/p1/minus': {
-                expression: [':raw(-)'],
-                yield: (args => ({
-                    kind: 'symbol'
-                }))
-            },
-
-            'expression/p2': {
-                expression: ['left:parse(expression/p3|expression/p_inf)', 'mid:parse(symbol/p2)', 'right:parse(expression/p2|expression/p3|expression/p_inf)'],
-                yield: left_associate('expression_p2')
-            },
-            'symbol/p2/multiply': {
-                expression: [':raw(*)'],
-                yield: (args => ({
-                    kind: 'symbol'
-                }))
-            },
-            'symbol/p2/divide': {
-                expression: [':raw(/)'],
-                yield: (args => ({
-                    kind: 'symbol'
-                }))
-            },
-            'symbol/p2/mod': {
-                expression: [':raw(%)'],
-                yield: (args => ({
-                    kind: 'symbol'
-                }))
-            },
-
-            'expression/p3/a': {
-                expression: ['callee:identifier', ':raw(()', 'args:parse(argument_list)', ':raw())'],
-                yield: (args => ({
-                    kind: 'expression_p3',
-                    cases: args
-                }))
-            },
-            'expression/p3/na': {
-                expression: ['callee:identifier', ':raw(()', ':raw())'],
-                yield: (args => ({
-                    kind: 'expression_p3',
-                    cases: args
-                }))
-            },
-            'argument_list/tail': {
-                expression: ['arg:parse(expression)'],
-                yield: (args => ({
-                    kind: 'argument_list',
-                    cases: {
-                        args: [args['arg']]
-                    }
-                }))
-            },
-            'argument_list/nontail': {
-                expression: ['arg:parse(expression)', ':raw(,)', 'al:parse(argument_list)'],
-                yield: function(args){
-                    args['al'].begin = args['al'].length = null;
-                    args['al'].cases.args.splice(0, 0, args['arg']);
-                    return args['al'];
-                }
-            },
-
-            'expression/p_inf/variable': {
-                expression: ['value:identifier'],
-                yield: (args => ({
-                    kind: 'value',
-                    cases: args
-                }))
-            },
-            'expression/p_inf/number': {
-                expression: ['value:number'],
-                yield: (args => ({
-                    kind: 'value',
-                    cases: args
-                }))
-            },
-            'expression/p_inf/bracket': {
-                expression: [':raw(()', 'exp:parse(expression)', ':raw())'],
-                yield: (args => ({
-                    kind: 'bracket',
-                    cases: args
-                }))
-            },
-
-            'statement/expression': {
-                expression: ['exp:parse(expression)', ':raw(;)'],
-                yield: (args => ({
-                    kind: 'statement_exp',
-                    cases: args
-                }))
-            },
-
-            'statement/if': {
-                expression: [':raw(if)', ':raw(()', 'condition:parse(expression)', ':raw())', ':raw({)', 'statements:parse(statements)', ':raw(})'],
-                yield: (args => ({
-                    kind: 'if',
-                    cases: args
-                }))
-            },
-
-            'statement/while': {
-                expression: [':raw(while)', ':raw(()', 'condition:parse(expression)', ':raw())', ':raw({)', 'statements:parse(statements)', ':raw(})'],
-                yield: (args => ({
-                    kind: 'while',
-                    cases: args
-                }))
-            },
-
-            'statements/single': {
-                expression: ['s:parse(statement)'],
-                yield: (args => ({
-                    kind: 'statements',
-                    cases:{
-                        statements: [args['s']]
-                    }
-                }))
-            },
-            'statements/multiple': {
-                expression: ['s:parse(statement)', 'ss:parse(statements)'],
-                /*yield: (args => ({
-                    kind: 'statements',
-                    cases: {
-                        statements: [args['s']].concat(args['ss'].cases.statements)
-                    }
-                }))*/
-                yield(args){
-                    args['ss'].begin = args['ss'].length = null;
-                    args['ss'].cases.statements.splice(0, 0, args['s']);
-                    return args['ss'];
-                }
-            },
-            'program': {
-                expression: ['s:parse(statements)', ':eof'],
-                yield: (args => args['s'])
-            },
-        };
+        this.rules = shibata.rules;
         /*  After processing, rule has the following format:
             {
                 name: rule_name,
@@ -394,9 +394,6 @@ class Parser{
         if (begin > this.furthest) this.furthest = begin;
 
         console.log('parse_general(' + kind + ', ' + begin + ')');
-        //let possibilities = this.possibilities['parse_general(' + kind + ', ' + begin + ')'];
-        //if (possibilities != undefined && possibilities != null) return possibilities;
-        //possibilities = [];
         if (context == undefined || context == null) context = {};
         let possibilities = [];
 
@@ -460,7 +457,6 @@ class Parser{
                             temp[ai.previous_action.case.name] = ai.previous_action_possibility;
                         }
                     }
-                    // console.log(temp);
                     console.log('yield(' + kind + ', ' + begin + ')');
                     let possibility = rule.yield(temp);
                     if (possibility.begin == undefined || possibility.begin == null) possibility.begin = begin;
@@ -472,7 +468,6 @@ class Parser{
         }
 
         console.log('~parse_general(' + kind + ', ' + begin + ')');
-        //this.possibilities['parse_general(' + kind + ', ' + begin + ')'] = possibilities;
         return possibilities;
     }
 }
