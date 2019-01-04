@@ -281,11 +281,10 @@ let shibata = {
 <script type="application/javascript" id="compiler">
 function TOKEN_EOF(){}
 
-function scan(code){
+function scan(code, patterns){
     let tokens = [];
     let ranges = [];
     let current_position = 0;
-    let patterns = shibata.patterns;
     
     while (code != ""){
         let match = null;
@@ -319,7 +318,7 @@ function scan(code){
 }
 
 class Parser{
-    constructor(tokens){
+    constructor(tokens, rules){
         this.possibilities = {};
         this.tokens = tokens.slice(0);
         this.furthest = 0;
@@ -332,7 +331,7 @@ class Parser{
             expression is an array of grammatical cases. It will be processed into a linklist. Therefore rule should never be modified/cloned.
             yield is a function that generate possibilities.
         */
-        this.rules = shibata.rules;
+        this.rules = rules;
         /*  After processing, rule has the following format:
             {
                 name: rule_name,
@@ -562,12 +561,12 @@ function run(){
     let start_time = new Date();
     let {'value': code} = document.getElementById("code");
     code = code.replace(/\r/g, "");
-    var [tokens, ranges] = scan(code);
+    var [tokens, ranges] = scan(code, shibata.patterns);
     console.log(tokens);
 
     setTimeout(function(){
 
-    let parser = new Parser(tokens);
+    let parser = new Parser(tokens, shibata.rules);
     let tree_possibilities = parser.parse_general('program', 0).sort((a, b) => b.length - a.length);
 
     document.getElementById('stdout').value += `done in ${new Date().getTime() - start_time.getTime()} ms\n`;
