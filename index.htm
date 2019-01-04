@@ -1,0 +1,671 @@
+<html>
+<head>
+
+<script type="application/javascript" id="compiler">
+function TOKEN_EOF(){}
+
+function scan(code){
+    let tokens = [];
+    let ranges = [];
+    let current_position = 0;
+    let patterns = [
+        {
+            name: 'space',
+            regex: /^\s+/,
+            push: false
+        },
+        {
+            name: 'comment',
+            regex: /^\/\/[^\n]*/,
+            push: false
+        },
+        {
+            name: 'comment',
+            regex: /^\/\*(?:[^\*]|\*(?!\/))*\*[\/]/,
+            push: false
+        },
+        {
+            name: 'identifier',
+            regex: /^[a-zA-Z_][a-zA-Z0-9_]*/,
+            push: true
+        },
+        {
+            name: 'number',
+            regex: /^[0-9]+/,
+            push: true
+        },
+        {
+            name: 'string literal',
+            regex: /^"(?:[^"\\]|\\.)*"/,
+            push: true
+        },
+        {
+            name: 'annotation',
+            regex: /^\[\[[^\[\]]*\]\]/,
+            push: true
+        },
+        {
+            name: 'symbol',
+            exact: ["[", "]", "(", ")", "{", "}", "->", ",", "=", ";", "...", "+", "-", "*", "/", "!", "%", "^", "&", "~", "?", ":", "|", "||", "&&", "+=", "-=", "*=", "/=", "%=", "^=", "&=", "~=", "|=", "++", "--", "==", "!=", ">=", "<=", ">", "<", ">>", "<<", ">>=", "<<="].sort((a, b) => b.length - a.length),
+            push: true
+        }
+    ];
+    
+    while (code != ""){
+        let match = null;
+        // console.log(code);
+        for (let pattern of patterns){
+            if (pattern.regex != null && pattern.regex != undefined && (match = code.match(pattern.regex)) != null){
+                if (pattern.push){
+                    tokens.push(match[0]);
+                    ranges.push([current_position, match[0].length]);
+                }
+                code = code.substring(match[0].length);
+                current_position += match[0].length;
+                break;
+            }else if (pattern.exact != null && pattern.exact != undefined && (match = pattern.exact.filter(e => code.substring(0, e.length) == e)[0]) != undefined){
+                if (pattern.push){
+                    tokens.push(match);
+                    ranges.push([current_position, match.length]);
+                }
+                code = code.substring(match.length);
+                current_position += match.length;
+                break;
+            }else{
+                match = null;
+            }
+        }
+        if (match == null) return null;
+    }
+    tokens.push(TOKEN_EOF);
+    ranges.push([code.length, 0]);
+    return [tokens, ranges];
+}
+
+function left_associate(kind){
+    return function(args){
+        if (args.right.kind != kind){
+            return ({
+                kind: kind,
+                cases: args
+            });
+        }else{
+            let range_fixing_lists = [];
+            let t = args.right;
+            range_fixing_lists.push(t);
+            while (t.cases.left.kind == kind){
+                t = t.cases.left;
+                range_fixing_lists.push(t);
+            }
+
+            let tl = t.cases.left;
+            let tm = t.cases.mid;
+            let tr = t.cases.right;
+            let range_fix = tl.begin - args.left.begin;
+            
+            t.cases.left = {
+                kind: kind,
+                cases: {
+                    left: args.left,
+                    mid: args.mid,
+                    right: tl,
+                },
+                begin: args.left.begin,
+                length: tl.begin + tl.length - args.left.begin,
+                associates: {}
+            };
+
+            for (let t2 of range_fixing_lists){
+                t2.begin -= range_fix;
+                t2.length += range_fix;
+            }
+            
+            return args.right;
+        }
+    }
+}
+
+class Parser{
+    constructor(tokens){
+        this.possibilities = {};
+        this.tokens = tokens.slice(0);
+        this.furthest = 0;
+
+        /*  Before processing, rule has the following format:
+            {
+                expression: ['<case_name>:<case_proc>'...],
+                yield: <yield>
+            }
+            expression is an array of grammatical cases. It will be processed into a linklist. Therefore rule should never be modified/cloned.
+            yield is a function that generate possibilities.
+        */
+        this.rules = {
+            'parameter_list/tail': {
+                expression: ['param:identifier'],
+                yield: (args => ({
+                    kind: 'parameter_list',
+                    cases: {
+                        params: [args['param']]
+                    }
+                }))
+            },
+            'parameter_list/nontail': {
+                expression: ['param:identifier', ':raw(,)', 'pl:parse(parameter_list)'],
+                yield: function(args){
+                    args['pl'].begin = args['pl'].length = null;
+                    args['pl'].cases.params.splice(0, 0, args['param']);
+                    return args['pl'];
+                }
+            },
+            'statement/function/p': {
+                expression: [':raw(function)', 'name:identifier', ':raw(()', 'params:parse(parameter_list)', ':raw())', ':raw({)', 'statements:parse(statements)', ':raw(})'],
+                yield: (args => ({
+                    kind: 'function',
+                    cases: args
+                }))
+            },
+            'statement/function/no_p': {
+                expression: [':raw(function)', 'name:identifier', ':raw(()', ':raw())', ':raw({)', 'statements:parse(statements)', ':raw(})'],
+                yield: (args => ({
+                    kind: 'function',
+                    cases: args
+                }))
+            },
+            
+            'expression/p0': {
+                // expression: ['left:parse(expression/p1|expression/p2|expression/p3|expression/p_inf)', 'mid:parse(symbol/p0)', 'right:parse(expression/p0|expression/p1|expression/p2|expression/p3|expression/p_inf)'],
+                expression: ['left:parse(expression/p_inf/variable)', 'mid:parse(symbol/p0)', 'right:parse(expression/p0|expression/p1|expression/p2|expression/p3|expression/p_inf)'],
+                yield: (args => ({
+                    kind: 'expression_p0',
+                    cases: args
+                }))
+            },
+            'symbol/p0/assign': {
+                expression: [':raw(=)'],
+                yield: (args => ({
+                    kind: 'symbol'
+                }))
+            },
+
+            'expression/p1': {
+                expression: ['left:parse(expression/p2|expression/p3|expression/p_inf)', 'mid:parse(symbol/p1)', 'right:parse(expression/p1|expression/p2|expression/p3|expression/p_inf)'],
+                yield: left_associate('expression_p1')
+            },
+            'symbol/p1/plus': {
+                expression: [':raw(+)'],
+                yield: (args => ({
+                    kind: 'symbol'
+                }))
+            },
+            'symbol/p1/minus': {
+                expression: [':raw(-)'],
+                yield: (args => ({
+                    kind: 'symbol'
+                }))
+            },
+
+            'expression/p2': {
+                expression: ['left:parse(expression/p3|expression/p_inf)', 'mid:parse(symbol/p2)', 'right:parse(expression/p2|expression/p3|expression/p_inf)'],
+                yield: left_associate('expression_p2')
+            },
+            'symbol/p2/multiply': {
+                expression: [':raw(*)'],
+                yield: (args => ({
+                    kind: 'symbol'
+                }))
+            },
+            'symbol/p2/divide': {
+                expression: [':raw(/)'],
+                yield: (args => ({
+                    kind: 'symbol'
+                }))
+            },
+            'symbol/p2/mod': {
+                expression: [':raw(%)'],
+                yield: (args => ({
+                    kind: 'symbol'
+                }))
+            },
+
+            'expression/p3/a': {
+                expression: ['callee:identifier', ':raw(()', 'args:parse(argument_list)', ':raw())'],
+                yield: (args => ({
+                    kind: 'expression_p3',
+                    cases: args
+                }))
+            },
+            'expression/p3/na': {
+                expression: ['callee:identifier', ':raw(()', ':raw())'],
+                yield: (args => ({
+                    kind: 'expression_p3',
+                    cases: args
+                }))
+            },
+            'argument_list/tail': {
+                expression: ['arg:parse(expression)'],
+                yield: (args => ({
+                    kind: 'argument_list',
+                    cases: {
+                        args: [args['arg']]
+                    }
+                }))
+            },
+            'argument_list/nontail': {
+                expression: ['arg:parse(expression)', ':raw(,)', 'al:parse(argument_list)'],
+                yield: function(args){
+                    args['al'].begin = args['al'].length = null;
+                    args['al'].cases.args.splice(0, 0, args['arg']);
+                    return args['al'];
+                }
+            },
+
+            'expression/p_inf/variable': {
+                expression: ['value:identifier'],
+                yield: (args => ({
+                    kind: 'value',
+                    cases: args
+                }))
+            },
+            'expression/p_inf/number': {
+                expression: ['value:number'],
+                yield: (args => ({
+                    kind: 'value',
+                    cases: args
+                }))
+            },
+            'expression/p_inf/bracket': {
+                expression: [':raw(()', 'exp:parse(expression)', ':raw())'],
+                yield: (args => ({
+                    kind: 'bracket',
+                    cases: args
+                }))
+            },
+
+            'statement/expression': {
+                expression: ['exp:parse(expression)', ':raw(;)'],
+                yield: (args => ({
+                    kind: 'statement_exp',
+                    cases: args
+                }))
+            },
+
+            'statement/if': {
+                expression: [':raw(if)', ':raw(()', 'condition:parse(expression)', ':raw())', ':raw({)', 'statements:parse(statements)', ':raw(})'],
+                yield: (args => ({
+                    kind: 'if',
+                    cases: args
+                }))
+            },
+
+            'statement/while': {
+                expression: [':raw(while)', ':raw(()', 'condition:parse(expression)', ':raw())', ':raw({)', 'statements:parse(statements)', ':raw(})'],
+                yield: (args => ({
+                    kind: 'while',
+                    cases: args
+                }))
+            },
+
+            'statements/single': {
+                expression: ['s:parse(statement)'],
+                yield: (args => ({
+                    kind: 'statements',
+                    cases:{
+                        statements: [args['s']]
+                    }
+                }))
+            },
+            'statements/multiple': {
+                expression: ['s:parse(statement)', 'ss:parse(statements)'],
+                /*yield: (args => ({
+                    kind: 'statements',
+                    cases: {
+                        statements: [args['s']].concat(args['ss'].cases.statements)
+                    }
+                }))*/
+                yield(args){
+                    args['ss'].begin = args['ss'].length = null;
+                    args['ss'].cases.statements.splice(0, 0, args['s']);
+                    return args['ss'];
+                }
+            },
+            'program': {
+                expression: ['s:parse(statements)', ':eof'],
+                yield: (args => args['s'])
+            },
+        };
+        /*  After processing, rule has the following format:
+            {
+                name: rule_name,
+                expression: ['<case_name>:<case_proc>'],
+                yield: <yield>,
+                cases: [{
+                    name: <case_name>,
+                    proc: <case_proc>,
+                    next_case: <next_case>
+                }...]
+            }
+        */
+        for (let rule_name in this.rules){
+            let rule = this.rules[rule_name];
+            rule.name = rule_name;
+            rule.cases = rule.expression.map(e => e.split(':')).map(e => ({
+                name: e[0],
+                proc: e[1],
+                next_case: null
+            }));
+            for (let i = 0; i < rule.cases.length - 1; i++) rule.cases[i].next_case = rule.cases[i + 1];
+        }
+    }
+    parse_identifier(begin){
+        let possibilities = this.possibilities['parse_identifier(' + begin + ')'];
+        if (possibilities != undefined && possibilities != null) return possibilities;
+        possibilities = [];
+
+        if (/^[a-zA-Z_][a-zA-Z0-9_]*/.test(this.tokens[begin])){
+            possibilities.push({
+                begin: begin,
+                length: 1,
+                kind: 'identifier'
+            });
+        }
+
+        this.possibilities['parse_identifier(' + begin + ')'] = possibilities;
+        return possibilities;
+    }
+    parse_number(begin){
+        let possibilities = this.possibilities['parse_number(' + begin + ')'];
+        if (possibilities != undefined && possibilities != null) return possibilities;
+        possibilities = [];
+
+        if (/^[0-9]+/.test(this.tokens[begin])){
+            possibilities.push({
+                begin: begin,
+                length: 1,
+                kind: 'number'
+            });
+        }
+
+        this.possibilities['parse_number(' + begin + ')'] = possibilities;
+        return possibilities;
+    }
+
+
+    parse_general(kind, begin, context){
+        if (begin > this.furthest) this.furthest = begin;
+
+        console.log('parse_general(' + kind + ', ' + begin + ')');
+        //let possibilities = this.possibilities['parse_general(' + kind + ', ' + begin + ')'];
+        //if (possibilities != undefined && possibilities != null) return possibilities;
+        //possibilities = [];
+        if (context == undefined || context == null) context = {};
+        let possibilities = [];
+
+        let applicable_rules = kind.split('|').flatMap(k => Object.keys(this.rules).filter(rule_name => k == '' || rule_name == k || rule_name.startsWith(k + '/')));
+        if (applicable_rules.length == 0){
+            console.error('Compiler error: No applicable rules found for kind ' + kind);
+        }
+
+        for (let rule_name of applicable_rules){
+            let rule = this.rules[rule_name];
+            
+            
+            
+            let action_queue = [{
+                case: rule.cases[0],
+                begin: begin,
+                previous_action: null,
+                previous_action_possibility: null
+            }];
+            
+            // for (let action of action_queue){ // BFS manner
+            for (let qi = 0; qi < action_queue.length; qi++){ // DFS manner
+                let action = action_queue[qi];
+                if (action.case != null){
+                    let match = null;
+                    if      (false)                                                         ;
+                    else if (action.case.proc == 'identifier')                              action.possibilities = this.parse_identifier(action.begin);
+                    else if (action.case.proc == 'number')                                  action.possibilities = this.parse_number(action.begin);
+                    else if (action.case.proc.startsWith('raw('))                           action.possibilities = (action.case.proc == 'raw(' + this.tokens[action.begin] + ')' ? [{
+                                                                                                begin: action.begin,
+                                                                                                length: 1,
+                                                                                                kind: 'raw'
+                                                                                            }] : []);
+                    else if ((match = action.case.proc.match(/^parse\((.*)\)$/)) != null)   action.possibilities = this.parse_general(match[1], action.begin, context);
+                    else if (action.case.proc == 'eof')                                     action.possibilities = (this.tokens[action.begin] == TOKEN_EOF ? [{
+                                                                                                begin: action.begin,
+                                                                                                length: 1,
+                                                                                                kind: 'eof'
+                                                                                            }] : []);
+                    else{
+                        console.error('Compiler error: unknown rule proc \'' + action.case.proc + '\' for rule \'' + rule_name + '\'');
+                        action.possibilities = [];
+                    }
+                    
+                    
+                    
+                    
+                    for (let possibility of action.possibilities){
+                        // action_queue.push({ // BFS manner
+                        action_queue.splice(qi + 1, 0, { // DFS manner
+                            case: action.case.next_case,
+                            begin: possibility.begin + possibility.length,
+                            previous_action: action,
+                            previous_action_possibility: possibility
+                        });
+                    }
+                }else{
+                    let temp = {};
+                    for (let ai = action; ai.previous_action != null; ai = ai.previous_action){
+                        if (ai.previous_action.case.name != ''){
+                            temp[ai.previous_action.case.name] = ai.previous_action_possibility;
+                        }
+                    }
+                    // console.log(temp);
+                    console.log('yield(' + kind + ', ' + begin + ')');
+                    let possibility = rule.yield(temp);
+                    if (possibility.begin == undefined || possibility.begin == null) possibility.begin = begin;
+                    if (possibility.length == undefined || possibility.length == null) possibility.length = action.begin - begin;
+                    if (possibility.associates == undefined || possibility.associates == null) possibility.associates = {};
+                    possibilities.push(possibility);
+                }
+            }
+        }
+
+        console.log('~parse_general(' + kind + ', ' + begin + ')');
+        //this.possibilities['parse_general(' + kind + ', ' + begin + ')'] = possibilities;
+        return possibilities;
+    }
+}
+</script>
+
+<script type="application/javascript" id="runtime">
+let call_stacks = [{}];
+
+// build-in function
+call_stacks[0].LOG_DEBUG = function(v){
+    console.log(v);
+    return v;
+}
+call_stacks[0].equals = function(x,y){
+    return x == y ? 1 : 0;
+}
+call_stacks[0].log = function(v){
+    document.getElementById('stdout').value += `${v}\n`;
+}
+
+
+function call_stacks_get(name){
+    for (let frame of call_stacks){
+        if (Object.keys(frame).includes(name)) return frame[name];
+    }
+    return undefined;
+}
+function call_stacks_set(name, value){
+    for (let frame of call_stacks){
+        if (Object.keys(frame).includes(name)) return frame[name] = value;
+    }
+    return call_stacks[0][name] = value;
+}
+
+function execute(ast, tokens){
+    if (ast.kind == 'statements'){
+        for (let s of ast.cases.statements) execute(s, tokens);
+    }else if (ast.kind == 'statement_exp'){
+        execute(ast.cases.exp, tokens);
+    }else if (ast.kind == 'expression_p0'){
+        let var_name = tokens[ast.cases.left.begin];
+        let value = execute(ast.cases.right, tokens);
+        call_stacks_set(var_name, value);
+        return value;
+    }else if (ast.kind == 'expression_p3'){
+        let callee_name = tokens[ast.cases.callee.begin];
+        let args = ast.cases.args != null ? ast.cases.args.cases.args.map(arg => execute(arg, tokens)) : [];
+        return call_stacks_get(callee_name)(...args);
+    }else if (ast.kind.startsWith('expression')){
+        let l = execute(ast.cases.left, tokens);
+        let r = execute(ast.cases.right, tokens);
+        let op = tokens[ast.cases.mid.begin];
+        if      (op == '+') return l + r;
+        else if (op == '-') return l - r;
+        else if (op == '*') return l * r;
+        else if (op == '/') return l / r;
+        else if (op == '%') return l % r;
+    }else if (ast.kind == 'bracket'){
+        return execute(ast.cases.exp, tokens);
+    }else if (ast.kind == 'value'){
+        if (ast.cases.value.kind == 'identifier'){
+            let var_name = tokens[ast.cases.value.begin];
+            return call_stacks_get(var_name);
+        }else if (ast.cases.value.kind == 'number'){
+            return parseInt(tokens[ast.cases.value.begin]);
+        }
+    }else if (ast.kind == 'if'){
+        if (execute(ast.cases.condition, tokens) != 0) execute(ast.cases.statements, tokens);
+    }else if (ast.kind == 'while'){
+        while (execute(ast.cases.condition, tokens)) execute(ast.cases.statements, tokens);
+    }else if (ast.kind == 'function'){
+        let name = tokens[ast.cases.name.begin];
+        let params_name = ast.cases.params != null ? ast.cases.params.cases.params.map(i => tokens[i.begin]) : [];
+        call_stacks_set(name, function(...args){
+            call_stacks.unshift({});
+            for (let i = 0; i < params_name.length; i++) call_stacks[0][params_name[i]] = args[i];
+            call_stacks[0]['result'] = 0;
+            execute(ast.cases.statements, tokens);
+            return call_stacks.shift().result;
+        });
+    }else{
+        console.error(`Unknown kind ${tree.kind}`);
+    }
+}
+</script>
+
+<script type="application/javascript" id="tester">
+
+function run(){
+    document.getElementById('stdout').value = 'Parsing... ';
+
+    let start_time = new Date();
+    let {'value': code} = document.getElementById("code");
+    code = code.replace(/\r/g, "");
+    var [tokens, ranges] = scan(code);
+    console.log(tokens);
+
+    setTimeout(function(){
+
+    let parser = new Parser(tokens);
+    let tree_possibilities = parser.parse_general('program', 0).sort((a, b) => b.length - a.length);
+
+    document.getElementById('stdout').value += `done in ${new Date().getTime() - start_time.getTime()} ms\n`;
+    if (tree_possibilities.length == 0){
+        document.getElementById('stdout').value += 'Cannot compile:\n';
+        for (let i = Math.max(0, parser.furthest - 20); i < parser.furthest; i++) document.getElementById('stdout').value += tokens[i] + ' ';
+        document.getElementById('stdout').value += '\n';
+        document.getElementById('stdout').value += `>>> unexpected ${tokens[parser.furthest]}\n`;
+    }else if (tree_possibilities.length == 1){
+        start_time = new Date();
+        execute(tree_possibilities[0], tokens);
+        document.getElementById('stdout').value += `Finish in ${new Date().getTime() - start_time.getTime()} ms\n`;
+    }else{
+        document.getElementById('stdout').value += "Ambiguous code\n";
+    }
+
+    },0);
+}
+</script>
+
+</head>
+<body style="text-align: center">
+<div style="display: inline-block; text-align: left; width: 800px">
+<h1>Shibata interpreter</h1>
+<p>
+Your code:
+<textarea style="width: 100%; height: 40em; font-family: consolas, courier new; resize: none" id="code">function foo(x){
+    if (equals(x,1) + equals(x,2)){
+        result = 1;
+    }
+    if ((1-equals(x,1)) * (1-equals(x,2))){
+        result = foo(x-1) + foo(x-2);
+    }
+}
+
+i = 1;
+while (i-21){
+    log(foo(i));
+    i = i + 1;
+}</textarea>
+<input type="button" style="float: right" value="Run" onclick="run()" />
+</p>
+<p>
+Output:
+<textarea style="width: 100%; height: 40em; font-family: consolas, courier new; resize: none" id="stdout" disabled></textarea>
+</p>
+
+<h1>Disclaimer</h1>
+<p>
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+</p>
+
+<h1>Motivation</h1>
+<p>
+<a href="https://lihkg.com/thread/949827/page/1">https://lihkg.com/thread/949827/page/1</a><br /><br />
+LIHKG member "#73231 柴田ミチコ" promised to write a compiler. In order to encourage her to finish her compiler, I write this very simple interpreter. I hope she will show us her talent.
+</p>
+
+<h1>Frequently gave comment</h1>
+
+<h2>This thing is slow./The code is messy./This thing is rubbish.</h2>
+<p>
+Yes, it is rubbish. I took the proof-of-concept version of my project, and made some modifications to make this interpreter. As it is a proof-of-concept version, there is intentionally no optimization, no OOP, no organization, leave no room for scalability and maintenance. Thank you for your concern.
+</p>
+</p>
+
+<h1>Features</h1>
+<h2>Late binding</h2>
+<p>
+A name binds to the variable of the nearest stack frame. If there is no variable with such name, a new variable is defined in the current stack frame. There are two exceptions:<br />
+1. parameters are always newly defined in the current stack frame. This is the only way to use local variable.<br />
+2. 'result' variable is always newly defined in the current stack frame. This special variable is used for function return value.
+</p>
+
+<h2>Build-in function</h2>
+<p>
+equals(x,y): return 1 if x == y, otherwise 0<br />
+log(x): print the value of x
+</p>
+
+<h2>Supported statement/operators</h2>
+<p>
+operators: + - * / % = f()<br />
+statements: if while function (Note that else is not supported)
+</p>
+</div>
+
+
+</body>
+</html>
